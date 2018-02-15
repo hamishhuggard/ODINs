@@ -1,7 +1,7 @@
 ---
-title: "ODIN-SD 109 Daily Models"
+title: "Timing of calibration"
 author: "Hamish Huggard"
-date: "February 7, 2018"
+date: "February 14, 2018"
 output: html_document
 ---
 
@@ -18,6 +18,7 @@ library(reshape2)
 library(zoo)
 library(ggplot2)
 library(MASS)
+library(gridExtra)
 
 # Set working directory
 setwd("c:\\Users\\Hammo\\Documents\\smoke emissions project\\code_final")
@@ -113,64 +114,104 @@ names(odin.avgs) <- c('date',paste0(names(odin.avgs)[2:ncol(odin.avgs)],'.odin.1
 data <- merge(data,odin.avgs,by='date',all=FALSE)
 ```
 
-```{r build_models}
+## Calibration duration
+
+```{r calibration_duration}
+max.days <- 40
+
 # Use 24 hour periods starting and ending at noon
 date.lt <- as.POSIXlt(data$date)
 noons <- data[which(date.lt$hour==12 & date.lt$min==0),'date']
+start.date <- noons[1]
+end.date <- noons[length(noons)]
+day <- as.POSIXct('1/1/2') - as.POSIXct('1/1/1')
+week <- day * 7
+month <- week*4
 
-daily.model <- data.frame()
+mse <- data.frame(days=NA,mse=NA)
+mse[1:max.days,'days'] <- 1:max.days
 
-for (i in 2:length(noons)) {
+mse2 <- matrix(NA,ncol=31,nrow=max.days)
+for (i in 1:max.days) {
+  for (j in 0:30) {
+    train.inds <- which(start.date + day*i + day*j < data$date &
+                          data$date < start.date + day*i + day*j + week)
+    test.inds <- which(start.date + day*i + day*j + week < data$date &
+                          data$date < start.date + day*i + day*j + week + month)
+    train.data <- data[train.inds,]
+    test.data <- data[-train.inds]
+    model <- rlm(pm2.5~pm2.5.odin.109+temp.odin.109+rh.odin.109,data=train.data)
+    y.hat <- predict(model,test.data)
+    mse2[i,j+1] <- mean((test.data$pm2.5-y.hat)^2,na.rm=TRUE)
+  }
   
-  # Build the daily model and record coefficients
-  day.data <- data[data$date >= noons[i-1] & data$date <= noons[i],]
-  day <- day.data$date[1]
-  day.coefs <- summary(rlm(pm2.5~pm2.5.odin.109+rh.odin.109+temp.odin.109,
-                          data=day.data))$coefficients
-  daily.model[i,'day'] <- day
-  daily.model[i,'pm2.5'] <- day.coefs['pm2.5.odin.109',1]
-  daily.model[i,'temp'] <- day.coefs['temp.odin.109',1]
-  daily.model[i,'rh'] <- day.coefs['rh.odin.109',1]
-  daily.model[i,'cnst'] <- day.coefs['(Intercept)',1]
-  daily.model[i,'pm2.5.std'] <- day.coefs['pm2.5.odin.109',2]
-  daily.model[i,'temp.std'] <- day.coefs['temp.odin.109',2]
-  daily.model[i,'rh.std'] <- day.coefs['rh.odin.109',2]
-  daily.model[i,'cnst.std'] <- day.coefs['(Intercept)',2]
-  
-  # Record some facts about the day's data
-  daily.model[i,'mean.pm2.5'] <- mean(day.data$pm2.5)
-  daily.model[i,'mean.temp'] <- mean(day.data$temp.2m)
+  mse[i,'mse'] <- mean(mse2[i,])
   
 }
 
-# Plot linear models over time
-var.title <- c(pm2.5="expression('Coefficients for'~PM[2.5]~'from Daily Models')",
-               rh="'Coefficients for Relative Humidity from Daily Models'",
-               temp="'Coefficients for Temperature from Daily Models'",
-               cnst="'Constant Terms from Daily Models'")
-for (var in c('pm2.5','rh','temp','cnst')) {
-  var.std <- paste0(var,'.std')
-  eval(parse(text=paste("p <- ggplot(daily.model, aes(x=day,y=",var,")) +",
-    "geom_errorbar(aes(ymin=",var,"-",var.std,", ymax=",var,"+",var.std,")) + ",
-    "geom_point() + ",
-    'scale_colour_manual(values=c("red","blue")) + ',
-    'ylab("Coefficient") +',
-    'xlab("Day") +',
-    'ggtitle(',var.title[var],')'
-    )))
-  print(p)
-}
+mse
+
+summary(lm(mse~days,data=mse))$coefficients
+
+# Plot
+
+ggplot(mse,aes(days,mse)) +
+  geom_line() +
+  ylab("MSE") +
+  xlab("Days of Training Data Used") +
+  ggtitle("MSE of ODIN-109 Model with Varying-Sized Window of Training Data") +
+  geom_smooth(method="lm")
 ```
 
-```{r modelling_models}
-headers <- c(pm2.5="PM2.5 Coefficient Predictors",
-             rh="Relative Humidity Coefficient Predictors",
-             temp="Temperature Coefficient Predictors",
-             cnst="Constant Term Predictors")
-for (var in c('pm2.5','rh','temp','cnst')) {
-  eval(parse(text=paste0("form <- ",var," ~ day + mean.pm2.5")))# + mean.temp")))
-  coefs <- summary(lm(form,data=daily.model))$coefficients
-  writeLines(paste0('\n',headers[var],'\n'))
-  print(coefs)
+## Calibration Timing
+
+```{r timing}
+# Calibrating using one week of data
+mse.week <- data.frame(date=noons[1],mse=NA)
+mse.month <- data.frame(date=noons[1],mse=NA)
+no.days <- floor( (data$date[nrow(data)]-data$date[1]) )-30
+
+for (i in 1:no.days) {
+  # Week long window
+  train.inds <- which(start.date + i*day < data$date & 
+                        data$date < start.date + i*day + week)
+  train.data <- data[train.inds,]
+  test.data <- data[-train.inds,]
+  model <- rlm(pm2.5~pm2.5.odin.109+temp.odin.109+rh.odin.109,data=train.data)
+  y.hat <- predict(model,test.data)
+  mse.week[i,'mse'] <- mean((test.data$pm2.5-y.hat)^2,na.rm=TRUE)
+  mse.week[i,'date'] <- train.data[1,'date']
+  
+  # Month long window
+  train.inds <- which(start.date + i*day < data$date & 
+                        data$date < start.date + i*day + month)
+  train.data <- data[train.inds,]
+  test.data <- data[-train.inds,]
+  model <- rlm(pm2.5~pm2.5.odin.109+temp.odin.109+rh.odin.109,data=train.data)
+  y.hat <- predict(model,test.data)
+  mse.month[i,'mse'] <- mean((test.data$pm2.5-y.hat)^2,na.rm=TRUE)
+  mse.month[i,'date'] <- train.data[1,'date']
 }
+
+# Plot the month and week data together
+mse.week[,'duration'] <- rep("Week",nrow(mse.week))
+mse.month[,'duration'] <- rep("Month",nrow(mse.month))
+
+ggplot(rbind(mse.week,mse.month)) +
+  geom_line(aes(date,mse,colour=duration)) +
+  xlab("Start Date of Training Data") +
+  ylab("MSE") +
+  ggtitle("MSE of ODIN-109 Model with Sliding Window of Training Data") +
+  scale_colour_manual("Window length",values=c("red","blue"))
+
+# Look at linear models
+
+# Convert date from seconds to days with 0 = initial date
+mse.week$date2 <- (mse.week$date-mse.week$date[1])/24/60/60 
+mse.month$date2 <- (mse.week$date-mse.month$date[1])/24/60/60 
+summary(lm(mse~date2,data=mse.week))$coefficients
+summary(lm(mse~date2,data=mse.month))$coefficients
+# Start date is...
+mse.week$date[1]
+mse.month$date[1]
 ```

@@ -1,0 +1,462 @@
+---
+title: "variable_importance"
+author: "Hamish Huggard"
+date: "February 8, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load data
+
+```{r book_keeping}
+library(RPostgreSQL)
+library(rpart)
+library(reshape2)
+library(zoo)
+library(ggplot2)
+library(MASS)
+library(gridExtra)
+
+# Set working directory
+setwd("c:\\Users\\Hammo\\Documents\\smoke emissions project\\code_final")
+
+# Database login details (not in GitHub repo)
+load("access.Rda")
+
+# Connect to database
+p <- dbDriver("PostgreSQL")
+con <- dbConnect(p,
+                 user=access$user,
+                 password=access$pwd,
+                 host='penap-data.dyndns.org',
+                 dbname='cona',
+                 port=5432)
+```
+
+```{r load_ecan}
+# Load ECan data (stored locally)
+ecan <- read.csv('RangioraWinter2016.csv',stringsAsFactors=FALSE)
+names(ecan) <- c('date','time','wind.speed','wind.dir','wind.dir.std','wind.speed.std',
+                 'wind.max','co','temp.ground','temp.2m','temp.6m','pm10',
+                 'pm2.5','pm.course')
+ecan$date <- as.POSIXct(ecan$date,format = '%m/%d/%Y %H:%M', tz='Etc/GMT-12')
+ecan$time <- NULL # this is included in date
+```
+
+```{r load_odin}
+# ECan site has siteid=18
+odin.raw <-dbGetQuery(con,"SELECT d.recordtime AT TIME ZONE 'NZST' AS date,
+                            i.serialn as serial, s.name as label,
+                            d.value::numeric as val
+                           FROM data.fixed_data as d,  
+                            admin.sensor as s, admin.instrument as i
+                           WHERE s.id = d.sensorid
+                            AND s.instrumentid = i.id
+                            AND i.name = 'ODIN-SD-3'
+                            AND d.siteid = 18
+                            AND (i.serialn = 'ODIN-109')
+                            AND (d.recordtime BETWEEN '2016-07-11 00:00 NZST'
+                              AND '2017-07-26 00:00 NZST')
+                            AND NOT (d.recordtime BETWEEN '2016-09-25 02:00 NZST'
+                             AND '2016-09-25 03:00 NZST')
+                            AND (s.name = 'PM1'
+                             OR s.name = 'PM2.5'
+                             OR s.name = 'PM10'
+                             OR s.name = 'Temperature'
+                             OR s.name = 'RH')
+                           ORDER BY date;") 
+
+# 02:01 to 02:59 on 2016-09-25 is excluded because this is when the switch to NZST occurs.
+# Without the exclusion clause the timestamps will truncate at 'day'.
+
+# Truncate seconds from timestamps
+odin.raw$date <- trunc(odin.raw$date,'min')
+odin.raw$date <- as.POSIXct(odin.raw$date) # the above converted it to POSIXlt
+
+# Fix daylight savings bug
+ds.time <- as.POSIXct('09/25/2016 02:00',format = '%m/%d/%Y %H:%M', tz='Etc/GMT-12')
+odin.raw[odin.raw$date > ds.time, 'date'] <- 
+  odin.raw[odin.raw$date > ds.time, 'date'] + 60*60
+```
+
+## Preprocessing
+
+```{r odin_preprocessing}
+odin <- dcast(odin.raw, date~label, value.var='val', fun.aggregate=mean)
+
+# Make column names easier to type
+names(odin) <- tolower(names(odin))
+names(odin)[which(names(odin)=="temperature")] <- "temp"
+```
+
+```{r merge}
+data <- ecan
+
+# Make sure that there is a odin entry for each minute
+dates <- data.frame(date=seq(odin$date[1],odin$date[nrow(odin)],by='mins'))
+odin <- merge(odin,dates,by="date",all=TRUE)
+
+# Change the ODIN measurements from 1 min averages to 1 hour averages
+odin.zoo <- zoo( odin[,2:ncol(odin)] )
+odin.roll.apply <- rollapply(odin.zoo,width=60,by=1,FUN=mean,align="left",na.rm=TRUE)
+odin.avgs <- odin[1:nrow(odin.roll.apply),]
+odin.avgs[,2:ncol(odin)] <- odin.roll.apply
+
+# Take timestamps at the end of the hour average following ECan convention
+odin.avgs$date <- odin.avgs$date + 60*60 
+
+# Purge NaNs
+odin.avgs <- odin.avgs[!is.nan(odin.avgs$pm1),]
+odin.avgs <- odin.avgs[!is.nan(odin.avgs$pm2.5),]
+odin.avgs <- odin.avgs[!is.nan(odin.avgs$pm10),]
+odin.avgs <- odin.avgs[!is.nan(odin.avgs$rh),]
+odin.avgs <- odin.avgs[!is.nan(odin.avgs$temp),]
+names(odin.avgs) <- c('date',paste0(names(odin.avgs)[2:ncol(odin.avgs)],'.odin.109'))
+data <- merge(data,odin.avgs,by='date',all=FALSE)
+```
+
+## Correlations
+
+```{r corrs}
+# Correlation between CO and PM2.5
+cor(data$pm2.5, data$co, use="complete.obs", method="pearson")
+
+# Correlation between PM1 and PM2.5
+cor(data$pm2.5.odin.109, data$pm1.odin.109, use="complete.obs", method="pearson")
+
+# Correlation between PM10 and PM2.5
+cor(data$pm2.5.odin.109, data$pm10.odin.109, use="complete.obs", method="pearson")
+```
+
+## Variable Importance out of ODIN Measurments
+
+N.B. I am using lm rather than rlm because rlm does not give an r-squared. The differences in variable significances are small (less than 5 points).
+
+```{r var_import_odin}
+# Normalize data
+# I.e., give each measurement a mean of zero and standard deviation of one.
+# TODO: try making the measurements look normal. PM2.5 is log normal.
+data.norm <- data
+data.norm[,2:ncol(data)] <- scale(data[,2:ncol(data)])
+
+# Linear Model
+form.odin <- pm2.5 ~ pm1.odin.109 + pm2.5.odin.109 + pm10.odin.109 + 
+                      rh.odin.109 + temp.odin.109
+lm.odin <- summary(lm(form.odin,data=data.norm))
+var.import.linear <- data.frame(var=c('PM1','PM2.5','PM10','RH','Temperature'))
+var.import.linear[1:5,'import'] <- abs(lm.odin$coefficients[c('pm1.odin.109',
+                                                              'pm2.5.odin.109',
+                                                              'pm10.odin.109',
+                                                              'rh.odin.109',
+                                                              'temp.odin.109'),1])
+var.import.linear[,'import'] <- round(var.import.linear$import /
+                                        sum(var.import.linear$import)*100, 2)
+var.import.linear
+
+# Record R-squareds
+r.sqr <- data.frame(vars=NA,r.sqr=NA)
+r.sqr[1,'vars'] <- "Just ODIN-SD"
+r.sqr[1,'r.sqr'] <- lm.odin$r.squared
+
+# Regression Tree
+tree.odin <- rpart(form.odin,method="anova",data=data)$variable.importance
+var.import.tree <- data.frame(var=c('PM1','PM2.5','PM10','RH','Temperature'))
+var.import.tree[1:5,'import'] <- tree.odin[c('pm1.odin.109','pm2.5.odin.109','pm10.odin.109',
+                                             'rh.odin.109','temp.odin.109')]
+var.import.tree[,'import'] <- round(var.import.tree$import /
+                                        sum(var.import.tree$import)*100, 2)
+var.import.tree
+
+# Pie Charts
+p1 <- ggplot(var.import.linear,aes(x="",y=import,fill=var)) +
+        geom_bar(width=1, stat="identity") +
+        ggtitle("Relative Importance of ODIN-SD") +
+        ylab("Relative Importance (%)") +
+        xlab("Linear Regression") +
+        scale_fill_discrete("Measurement",
+                            labels=c(PM1=expression(PM[1]),
+                                     PM2.5=expression(PM[2.5]),
+                                     PM10=expression(PM[10])))
+
+p2 <- ggplot(var.import.tree,aes(x="",y=import,fill=var)) +
+        geom_bar(width=2, stat="identity") +
+        ggtitle("Measurements") +
+        ylab("Relative Importance (%)") +
+        xlab("Regression Tree") +
+        scale_fill_discrete("Measurement",
+                            labels=c(PM1=expression(PM[1]),
+                                     PM2.5=expression(PM[2.5]),
+                                     PM10=expression(PM[10])))
+
+grid.arrange(p1,p2,ncol=2)
+```
+
+## Variable Improtance out of All Measurements
+```{r var_import_all}
+# Linear Model
+form.all <- pm2.5 ~ pm1.odin.109 + pm2.5.odin.109 + pm10.odin.109 + rh.odin.109 +
+                      temp.odin.109 + wind.speed + wind.dir + co
+lm.odin <- summary(lm(form.all,data=data.norm))
+var.import.linear <- data.frame(var=c('PM1','PM2.5','PM10','RH','Temperature',
+                                    'Wind Direction','Wind Speed','CO'))
+var.import.linear[1:8,'import'] <- abs(lm.odin$coefficients[c('pm1.odin.109',
+                                                              'pm2.5.odin.109',
+                                                              'pm10.odin.109',
+                                                              'rh.odin.109',
+                                                              'temp.odin.109',
+                                                              'wind.dir',
+                                                              'wind.speed','co'),1])
+var.import.linear[,'import'] <- round(var.import.linear$import /
+                                        sum(var.import.linear$import)*100, 2)
+var.import.linear
+
+# Record R-squareds
+r.sqr[2,'vars'] <- "ODIN-SD + Wind + CO"
+r.sqr[2,'r.sqr'] <- lm.odin$r.squared
+
+# Regression Tree
+tree.odin <- rpart(form.all,method="anova",data=data)$variable.importance
+var.import.tree <- data.frame(var=c('PM1','PM2.5','PM10','RH','Temperature',
+                                    'Wind Direction','Wind Speed','CO'))
+var.import.tree[1:8,'import'] <- tree.odin[c('pm1.odin.109','pm2.5.odin.109','pm10.odin.109',
+                                             'rh.odin.109','temp.odin.109','wind.dir',
+                                             'wind.speed','co')]
+var.import.tree[,'import'] <- round(var.import.tree$import /
+                                        sum(var.import.tree$import)*100, 2)
+var.import.tree
+
+# Pie Charts
+p1 <- ggplot(var.import.linear,aes(x="",y=import,fill=var)) +
+        geom_bar(width=1, stat="identity") +
+        ggtitle("Relative Importance of ODIN-SD") +
+        ylab("Relative Importance (%)") +
+        xlab("Linear Regression") +
+        scale_fill_discrete("Measurement",
+                            labels=c(PM1=expression(PM[1]),
+                                     PM2.5=expression(PM[2.5]),
+                                     PM10=expression(PM[10])))
+
+p2 <- ggplot(var.import.tree,aes(x="",y=import,fill=var)) +
+        geom_bar(width=2, stat="identity") +
+        ggtitle("and ECan Measurements") +
+        ylab("Relative Importance (%)") +
+        xlab("Regression Tree") +
+        scale_fill_discrete("Measurement",
+                            labels=c(PM1=expression(PM[1]),
+                                     PM2.5=expression(PM[2.5]),
+                                     PM10=expression(PM[10])))
+
+grid.arrange(p1,p2,ncol=2)
+```
+
+## Variable Importance out of All Measurments (excluding CO)
+```{r var_import_less_co}
+# Linear Model
+form.all <- pm2.5 ~ pm1.odin.109 + pm2.5.odin.109 + pm10.odin.109 + rh.odin.109 +
+                      temp.odin.109 + wind.speed + wind.dir
+lm.odin <- summary(lm(form.all,data=data.norm))
+var.import.linear <- data.frame(var=c('PM1','PM2.5','PM10','RH','Temperature',
+                                    'Wind Direction','Wind Speed'))
+var.import.linear[1:7,'import'] <- abs(lm.odin$coefficients[c('pm1.odin.109',
+                                                              'pm2.5.odin.109',
+                                                              'pm10.odin.109',
+                                                              'rh.odin.109',
+                                                              'temp.odin.109',
+                                                              'wind.dir',
+                                                              'wind.speed'),1])
+var.import.linear[,'import'] <- round(var.import.linear$import /
+                                        sum(var.import.linear$import)*100, 2)
+var.import.linear
+
+# Record R-squareds
+r.sqr[2,'vars'] <- "ODIN-SD + Wind"
+r.sqr[2,'r.sqr'] <- lm.odin$r.squared
+
+# Regression Tree
+tree.odin <- rpart(form.all,method="anova",data=data)$variable.importance
+var.import.tree <- data.frame(var=c('PM1','PM2.5','PM10','RH','Temperature',
+                                    'Wind Direction','Wind Speed'))
+var.import.tree[1:7,'import'] <- tree.odin[c('pm1.odin.109','pm2.5.odin.109','pm10.odin.109',
+                                             'rh.odin.109','temp.odin.109','wind.dir',
+                                             'wind.speed')]
+var.import.tree[,'import'] <- round(var.import.tree$import /
+                                        sum(var.import.tree$import)*100, 2)
+var.import.tree
+
+# Pie Charts
+p1 <- ggplot(var.import.linear,aes(x="",y=import,fill=var)) +
+        geom_bar(width=1, stat="identity") +
+        ggtitle("Relative Importance of Variables") +
+        ylab("Relative Importance (%)") +
+        xlab("Linear Regression") +
+        scale_fill_discrete("Measurement",
+                            labels=c(PM2.5=expression(PM[2.5]),
+                                     PM1=expression(PM[1]),
+                                     PM10=expression(PM[10])))
+
+p2 <- ggplot(var.import.tree,aes(x="",y=import,fill=var)) +
+        geom_bar(width=2, stat="identity") +
+        ggtitle("for Predicting TEOM PM2.5") +
+        ylab("Relative Importance (%)") +
+        xlab("Regression Tree") +
+        scale_fill_discrete("Measurement",
+                            labels=c(PM2.5=expression(PM[2.5]~"(ODIN-109)"),
+                                     PM1=expression(PM[1]~"(ODIN-109)"),
+                                     PM10=expression(PM[10]~"(ODIN-109)"),
+                                     Temperature="Temp (ODIN-109)",
+                                     RH="RH (ODIN-109)"))
+
+grid.arrange(p1,p2,ncol=2)
+```
+
+## R-Squared of Different Variable Combinations
+```{r r_sqr}
+r.sqr.2 <- r.sqr
+# Just PM2.5
+lm. <- lm(pm2.5 ~ pm2.5.odin.109, data=data.norm)
+r.sqr[1,'vars'] <- "PM2.5"
+r.sqr[1,'r.sqr'] <- summary(lm.)$r.squared
+
+# PM2.5 + Temperature + RH
+lm. <- lm(pm2.5 ~ pm2.5.odin.109 + temp.odin.109 + rh.odin.109, data=data.norm)
+r.sqr[2,'vars'] <- "PM2.5 + Temp + RH."
+r.sqr[2,'r.sqr'] <- summary(lm.)$r.squared
+
+# PM1 + PM2.5 + PM10
+lm. <- lm(pm2.5 ~ pm1.odin.109 + pm2.5.odin.109 + pm10.odin.109, data=data.norm)
+r.sqr[3,'vars'] <- "PM1 + PM2.5 + PM10"
+r.sqr[3,'r.sqr'] <- summary(lm.)$r.squared
+
+# PM2.5 + Wind Direction + Wind Speed
+lm. <- lm(pm2.5 ~ pm2.5.odin.109 + wind.dir + wind.speed, data=data.norm)
+r.sqr[4,'vars'] <- "PM2.5 + Wind"
+r.sqr[4,'r.sqr'] <- summary(lm.)$r.squared
+
+# PM1 + PM2.5 + PM10 + Temperature + RH
+lm. <- lm(pm2.5 ~ pm1.odin.109 + pm2.5.odin.109 + pm10.odin.109 + 
+            temp.odin.109 + rh.odin.109, data=data.norm)
+r.sqr[5,'vars'] <- "All ODIN"
+r.sqr[5,'r.sqr'] <- summary(lm.)$r.squared
+
+# PM1 + PM2.5 + PM10 + Temperature + RH + Wind Direction + Wind Speed
+lm. <- lm(pm2.5 ~ pm1.odin.109 + pm2.5.odin.109 + pm10.odin.109 + temp.odin.109 +
+            rh.odin.109 + wind.dir + wind.speed, data=data.norm)
+r.sqr[6,'vars'] <- "All"
+r.sqr[6,'r.sqr'] <- summary(lm.)$r.squared
+
+# PM2.5 + Date
+lm. <- lm(pm2.5 ~ pm2.5.odin.109 + date, data=data.norm)
+r.sqr[7,'vars'] <- "PM2.5 + Date"
+r.sqr[7,'r.sqr'] <- summary(lm.)$r.squared
+
+r.sqr[,'r.sqr'] <- round(r.sqr$r.sqr*100,1)
+r.sqr
+```
+
+## Mean Square Error of Different Variable Combinations
+```{r mse}
+# Split up data into thirds
+third <- as.integer(nrow(data)/3)
+data.1 <- data[1:third,]
+data.2 <- data[(third+1):(third*2),]
+data.3 <- data[(third*2+1):nrow(data),]
+
+model.names <- c("PM2.5","PM2.5 + RH + Temp","All PM","PM2.5 + Wind",
+                   "All ODIN","All ODIN + Wind","PM2.5 + Temp","PM2.5 + RH")
+
+# Table of mean-square-errors
+mse <- data.frame(model=NA,group=NA,data.1=NA,data.2=NA,data.3=NA,avg=NA)
+# dim=c(length(model.names),4),
+#               dimnames=list(model.names,c('data.1','data.2','data.3','avg')))
+mse[1:length(model.names),1] <- model.names
+
+for (j in 1:3) {
+  
+  # Test and training data
+  eval(parse(text=paste0("test.data <- data.",j)))
+  eval(parse(text=paste0("train.data <- rbind(data.",1+j%%3,",data.",1+(j+1)%%3,")")))
+  
+  j_ <- j+2
+  
+  # Just PM2.5
+  model <- lm(pm2.5 ~ pm2.5.odin.109,data=train.data)
+  y.hat <- predict(model,test.data)
+  mse[1,j_] <- mean((test.data$pm2.5-y.hat)^2,na.rm=TRUE)
+  
+  # PM2.5 + Temperature + RH
+  model <- lm(pm2.5 ~ pm2.5.odin.109 + temp.odin.109 + rh.odin.109,data=train.data)
+  y.hat <- predict(model,test.data)
+  mse[2,j_] <- mean((test.data$pm2.5-y.hat)^2,na.rm=TRUE)
+  
+  # PM1 + PM2.5 + PM10
+  model <- lm(pm2.5 ~ pm1.odin.109 + pm2.5.odin.109 + pm10.odin.109,data=train.data)
+  y.hat <- predict(model,test.data)
+  mse[3,j_] <- mean((test.data$pm2.5-y.hat)^2,na.rm=TRUE)
+  
+  # PM2.5 + Wind Direction + Wind Speed
+  model <- lm(pm2.5 ~ pm2.5.odin.109 + wind.dir + wind.speed,data=train.data)
+  y.hat <- predict(model,test.data)
+  mse[4,j_] <- mean((test.data$pm2.5-y.hat)^2,na.rm=TRUE)
+  
+  # PM1 + PM2.5 + PM10 + Temperature + RH
+  model <- lm(pm2.5 ~ pm1.odin.109 + pm2.5.odin.109 + pm10.odin.109 + 
+              temp.odin.109 + rh.odin.109,data=train.data)
+  y.hat <- predict(model,test.data)
+  mse[5,j_] <- mean((test.data$pm2.5-y.hat)^2,na.rm=TRUE)
+  
+  # PM1 + PM2.5 + PM10 + Temperature + RH + Wind Direction + Wind Speed
+  model <- lm(pm2.5 ~ pm1.odin.109 + pm2.5.odin.109 + pm10.odin.109 + temp.odin.109 +
+              rh.odin.109 + wind.dir + wind.speed,data=train.data)
+  y.hat <- predict(model,test.data)
+  mse[6,j_] <- mean((test.data$pm2.5-y.hat)^2,na.rm=TRUE)
+  
+  # PM2.5 + Temperature
+  model <- lm(pm2.5 ~ pm2.5.odin.109 + temp.odin.109,data=train.data)
+  y.hat <- predict(model,test.data)
+  mse[7,j_] <- mean((test.data$pm2.5-y.hat)^2,na.rm=TRUE)
+  
+  # PM2.5 + RH
+  model <- lm(pm2.5 ~ pm2.5.odin.109 + rh.odin.109,data=train.data)
+  y.hat <- predict(model,test.data)
+  mse[8,j_] <- mean((test.data$pm2.5-y.hat)^2,na.rm=TRUE)
+  
+  # date makes it worse
+  
+  # # PM2.5 + Date
+  # model <- lm(pm2.5 ~ pm2.5.odin.109 + date,data=train.data)
+  # y.hat <- predict(model,test.data)
+  # mse[9,j_] <- mean((test.data$pm2.5-y.hat)^2,na.rm=TRUE)
+  # 
+  # # PM2.5 + temp + RH + Date
+  # model <- lm(pm2.5 ~ pm2.5.odin.109 + temp.odin.109 + rh.odin.109 + date,data=train.data)
+  # y.hat <- predict(model,test.data)
+  # mse[8,j_] <- mean((test.data$pm2.5-y.hat)^2,na.rm=TRUE)
+  
+}
+
+# Find average accross datasets
+for (i in 1:length(model.names)) {
+  mse[i,'avg'] <- mean(as.numeric(mse[i,3:5]))
+}
+
+# Round values
+mse[,3:ncol(mse)] <- round(mse[,3:ncol(mse)],2)
+# Sort by 'avg' column
+mse <- mse[order(mse[,'avg']),]
+# So that ggplot doesn't reorder
+mse[,'model'] <- factor(mse$model,levels=mse$model)
+# Display
+mse
+
+ggplot(mse,aes(model,avg)) +
+  geom_bar(stat="identity",aes(fill=model),position="dodge",guide=FALSE) +
+  ylab("Mean Square Error") +
+  xlab("") +
+  # xlab("Input Variables") +
+  ggtitle("MSE from Different Input Variables Using All ODIN-109 Data") +
+  theme(axis.text.x=element_text(angle=45,hjust=1,vjust=1)) +
+  scale_fill_discrete(guide=FALSE)
+```

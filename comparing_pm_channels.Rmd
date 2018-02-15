@@ -1,0 +1,210 @@
+---
+title: "PM Comparison"
+author: "Hamish Huggard"
+date: "February 13, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load data
+
+```{r book_keeping}
+library(RPostgreSQL)
+library(reshape2)
+library(ggplot2)
+
+# Set working directory
+setwd("c:\\Users\\Hammo\\Documents\\smoke emissions project\\code_final")
+
+# Database login details (not in GitHub repo)
+load("access.Rda")
+
+# Connect to database
+p <- dbDriver("PostgreSQL")
+con <- dbConnect(p,
+                 user=access$user,
+                 password=access$pwd,
+                 host='penap-data.dyndns.org',
+                 dbname='cona',
+                 port=5432)
+```
+
+```{r load_ecan}
+# Load ECan data (stored locally)
+ecan <- read.csv('RangioraWinter2016.csv',stringsAsFactors=FALSE)
+names(ecan) <- c('date','time','wind.speed','wind.dir','wind.dir.std','wind.speed.std',
+                 'wind.max','co','temp.ground','temp.2m','temp.6m','pm10',
+                 'pm2.5','pm.course')
+ecan$date <- as.POSIXct(ecan$date,format = '%m/%d/%Y %H:%M', tz='Etc/GMT-12')
+ecan$time <- NULL # this is included in date
+```
+
+```{r load_odin}
+# ECan site has siteid=18
+odin.raw <-dbGetQuery(con,"SELECT d.recordtime AT TIME ZONE 'NZST' AS date,
+                            i.serialn as serial, s.name as label,
+                            d.value::numeric as val
+                           FROM data.fixed_data as d,  
+                            admin.sensor as s, admin.instrument as i
+                           WHERE s.id = d.sensorid
+                            AND s.instrumentid = i.id
+                            AND i.name = 'ODIN-SD-3'
+                            AND d.siteid = 18
+                            AND (i.serialn = 'ODIN-109')
+                            AND (d.recordtime BETWEEN '2016-07-11 00:00 NZST'
+                              AND '2017-07-26 00:00 NZST')
+                            AND NOT (d.recordtime BETWEEN '2016-09-25 02:00 NZST'
+                             AND '2016-09-25 03:00 NZST')
+                            AND (s.name = 'PM1'
+                             OR s.name = 'PM2.5'
+                             OR s.name = 'PM10')
+                           ORDER BY date;") 
+
+# 02:01 to 02:59 on 2016-09-25 is excluded because this is when the switch to NZST occurs.
+# Without the exclusion clause the timestamps will truncate at 'day'.
+
+# Truncate seconds from timestamps
+odin.raw$date <- trunc(odin.raw$date,'min')
+odin.raw$date <- as.POSIXct(odin.raw$date) # the above converted it to POSIXlt
+
+# Fix daylight savings bug
+ds.time <- as.POSIXct('09/25/2016 02:00',format = '%m/%d/%Y %H:%M', tz='Etc/GMT-12')
+odin.raw[odin.raw$date > ds.time, 'date'] <- 
+odin.raw[odin.raw$date > ds.time, 'date'] + 60*60
+```
+
+```{r odin_preprocessing}
+odin <- dcast(odin.raw, date~label, value.var='val', fun.aggregate=mean)
+
+# Make column names easier to type
+names(odin) <- tolower(names(odin))
+names(odin)[which(names(odin)=="temperature")] <- "temp"
+```
+
+## Comparison of Channels
+
+```{r compare_channels}
+# How well the other channels correlate with PM1
+pm1.corr <- matrix(NA,nrow=3,ncol=2,
+                   dimnames=list(c("All","Upper half PM course","Lower half PM course"),
+                                 c("PM2.5","PM10")))
+
+ggplot(odin,aes(pm1,pm2.5)) +
+  geom_point(alpha=0.5) +
+  geom_smooth(method="lm") +
+  ggtitle("All ODIN-109 Data") +
+  xlab(expression(PM[1])) +
+  ylab(expression(PM[2.5]))
+
+pm1.corr[1,1] <- cor(odin$pm1,odin$pm2.5,use="complete.obs",method="pearson")
+
+ggplot(odin,aes(pm1,pm10)) +
+  geom_point(alpha=0.5) +
+  geom_smooth(method="lm") +
+  ggtitle("All ODIN-109 Data") +
+  xlab(expression(PM[1])) +
+  ylab(expression(PM[10]))
+
+pm1.corr[1,2] <- cor(odin$pm1,odin$pm10,use="complete.obs",method="pearson")
+```
+
+## Splitting by PM course
+```{r split}
+mid <- median(ecan$pm.course,na.rm=TRUE)
+upper.indices <- which(ecan$pm.course > mid)
+upper.dates <- ecan$date[upper.indices]
+lower.dates <- ecan$date[-upper.indices]
+
+upper.odin <- odin[which(odin$date %in% upper.dates),]
+lower.odin <- odin[which(odin$date %in% lower.dates),]
+
+# Upper half
+ggplot(upper.odin,aes(pm1,pm2.5)) +
+  geom_point(alpha=0.5) +
+  geom_smooth(method="lm") +
+  ggtitle(expression("ODIN-109 Channels Corresponding to Upper half of "*PM[course]~"Data")) +
+  xlab(expression(PM[1])) +
+  ylab(expression(PM[2.5]))
+
+pm1.corr[2,1] <- cor(upper.odin$pm1,upper.odin$pm2.5,use="complete.obs",method="pearson")
+
+ggplot(upper.odin,aes(pm1,pm10)) +
+  geom_point(alpha=0.5) +
+  geom_smooth(method="lm") +
+  ggtitle(expression("ODIN-109 Channels Corresponding to Upper half of "*PM[course]~"Data")) +
+  xlab(expression(PM[1])) +
+  ylab(expression(PM[10]))
+
+pm1.corr[2,2] <- cor(upper.odin$pm1,upper.odin$pm10,use="complete.obs",method="pearson")
+
+# Lower half
+ggplot(lower.odin,aes(pm1,pm2.5)) +
+  geom_point(alpha=0.5) +
+  geom_smooth(method="lm") +
+  ggtitle(expression("ODIN-109 Channels Corresponding to Lower half of "*PM[course]~"Data")) +
+  xlab(expression(PM[1])) +
+  ylab(expression(PM[2.5]))
+
+pm1.corr[3,1] <- cor(lower.odin$pm1,lower.odin$pm2.5,use="complete.obs",method="pearson")
+
+ggplot(lower.odin,aes(pm1,pm10)) +
+  geom_point(alpha=0.5) +
+  geom_smooth(method="lm") +
+  ggtitle(expression("ODIN-109 Channels Corresponding to Lower half of "*PM[course]~"Data")) +
+  xlab(expression(PM[1])) +
+  ylab(expression(PM[10]))
+
+pm1.corr[3,2] <- cor(lower.odin$pm1,lower.odin$pm10,use="complete.obs",method="pearson")
+
+# How well each channel correlates with PM1
+round(pm1.corr,4)
+```
+
+## Comparing PM2.5 and PM10
+
+```{r compare_channels2}
+ggplot(odin,aes(pm2.5,pm10)) +
+  geom_point(alpha=0.5) +
+  geom_smooth(method="lm") +
+  ggtitle("All ODIN-109 Data") +
+  ylab(expression(PM[10])) +
+  xlab(expression(PM[2.5]))
+
+cor(odin$pm2.5,odin$pm10,use="complete.obs",method="pearson")
+```
+
+## PM2.5 and PM10 minus PM1
+```{r minus_pm1}
+start <- 0#-25
+end <- 15#50
+
+d <- density(odin$pm2.5 - odin$pm1,na.rm=TRUE,from=start,to=end)
+ggplot(data.frame(x=d$x,y=d$y)) +
+  geom_line(aes(x,y)) +
+  ggtitle("Distribution of PM2.5 - PM1")
+
+d <- density(odin$pm10 - odin$pm1,na.rm=TRUE,from=start,to=end)
+ggplot(data.frame(x=d$x,y=d$y)) +
+  geom_line(aes(x,y)) +
+  ggtitle("Distribution of PM10 - PM1")
+
+d <- density(odin$pm10 - odin$pm2.5,na.rm=TRUE,from=start,to=end)
+ggplot(data.frame(x=d$x,y=d$y)) +
+  geom_line(aes(x,y)) +
+  ggtitle("Distribution of PM10 - PM2.5")
+
+d <- density(odin$pm2.5 - odin$pm1,na.rm=TRUE,from=start,to=end)
+d <- data.frame(x=d$x,pm2.5_pm1=d$y/5)
+d[,'pm10_pm2.5'] <- density(odin$pm10 - odin$pm2.5,na.rm=TRUE,from=start,to=end)$y
+d[,'pm10_pm1'] <- density(odin$pm10 - odin$pm1,na.rm=TRUE,from=start,to=end)$y
+
+d.long <- melt(d,id.vars='x')
+
+ggplot(d.long) +
+  geom_line(aes(x,value,colour=variable)) +
+  ggtitle("All together now")
+```
+

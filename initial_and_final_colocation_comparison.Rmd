@@ -165,12 +165,12 @@ for (i in 1:length(odins)) {
   eval(parse(text=paste0('form <- pm2.5 ~ ', paste(odin.vars,collapse='+'))))
   
   # Initial coefficients
-  this.init.coefs <- summary(rlm(form,data=data.init))$coefficients
+  this.init.coefs <- summary(lm(form,data=data.init))$coefficients
   coefs.init[i,'odin.n'] <- as.integer(substring(odin.name,6,8)) - 0.1
   coefs.init[i,2:9] <- this.init.coefs[1:8]
   
   # Final coefficients
-  this.fin.coefs <- summary(rlm(form,data=data.fin))$coefficients
+  this.fin.coefs <- summary(lm(form,data=data.fin))$coefficients
   coefs.fin[i,'odin.n'] <- as.integer(substring(odin.name,6,8)) + 0.1
   coefs.fin[i,2:9] <- this.fin.coefs[1:8]
   
@@ -263,8 +263,8 @@ for (serial in c(102,105,108)) {
   var.y.max <- 175
   
   # Initial and final model
-  model.init <- rlm(form,data=data.init)
-  model.fin <- rlm(form,data=data.fin)
+  model.init <- lm(form,data=data.init)
+  model.fin <- lm(form,data=data.fin)
   
   # Median dataframes
   medians.init <- data.frame()
