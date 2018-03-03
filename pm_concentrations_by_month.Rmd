@@ -1,0 +1,100 @@
+---
+title: "PM Concentrations by Month"
+author: "Hamish Huggard"
+date: "February 1, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load_ecan}
+library(ggplot2)
+library(reshape2)
+
+# Load ECan data (stored locally)
+ecan <- read.csv('RangioraWinter2016.csv',stringsAsFactors=FALSE)
+names(ecan) <- c('date','time','wind.speed','wind.dir','wind.dir.std','wind.speed.std',
+                 'wind.max','co','temp.ground','temp.2m','temp.6m','pm10',
+                 'pm2.5','pm.course')
+ecan$date <- as.POSIXct(ecan$date,format = '%m/%d/%Y %H:%M', tz='Etc/GMT-12')
+ecan$datel <- as.POSIXlt(ecan$date)
+ecan$time <- NULL # this is included in date
+```
+
+```{r month_by_month}
+months <- 6:9
+month.names <- c('July','August','September','October')
+densities <- data.frame(month=NA,y=NA,x=NA)
+no.points <- data.frame(month=NA,init=NA,fin=NA)
+for (i in 1:length(months)) {
+  month <- months[i]
+  month.name <- month.names[i]
+  month.data <- ecan[ecan$datel$mon==month & !is.na(ecan$pm2.5),'pm2.5']
+  no.points[i,'init'] <- length(month.data)
+  hist(month.data,
+       xlim=c(-10,160),
+       ylim=c(0,0.16),
+       breaks=seq(-20,160,3),
+       main=substitute(PM[2.5] ~ 'in' ~ mon, list(mon=month.name)),
+       xlab=expression(PM[2.5] ~ (mu*'g'~m^-3)),
+       prob=TRUE
+       )
+  d <- density(month.data)
+  densities <- rbind(densities,data.frame(month=rep(month.name,length(d$y)),y=d$y,x=d$x))
+}
+
+densities <- densities[2:nrow(densities),] # first row is na
+densities[,'month'] <- factor(densities$month,levels=c("July","August","September","October"))
+
+ggplot(densities) +
+  geom_line(aes(x=x,y=y,colour=month)) +
+  scale_colour_manual("Month",values=c(July="red",August="orange",September="green",October="blue")) +
+  xlab(expression(PM[2.5] ~ (mu*'g'~m^-3))) +
+  ylab("Density") +
+  ggtitle(substitute(PM[2.5] ~ 'Density by Month'))
+```
+
+## Ignore the following:
+
+```{r month_by_month_truncated}
+ecan.trunc <- ecan[!is.na(ecan$pm2.5),]
+print(which(is.na(ecan.trunc$pm2.5)))
+min.pm2.5 <- 0
+max.pm2.5 <- 10
+ecan.trunc <- ecan.trunc[ecan.trunc$pm2.5 < max.pm2.5 & ecan.trunc$pm2.5 > min.pm2.5,]
+
+months <- 6:9
+month.names <- c('July','August','September','October')
+densities <- data.frame(month=NA,y=NA,x=NA)
+for (i in 1:length(months)) {
+  month <- months[i]
+  month.name <- month.names[i]
+  month.data <- ecan.trunc[ecan.trunc$datel$mon==month,'pm2.5']
+  no.points[i,'fin'] <- length(month.data)
+  hist(month.data,
+       xlim=c(0,10),
+       ylim=c(0,0.2),
+       breaks=seq(0,10,1),
+       main=substitute(PM[2.5] ~ 'in' ~ mon, list(mon=month.name)),
+       xlab=expression(PM[2.5] ~ (mu*'g'~m^-3)),
+       prob=TRUE
+       )
+  d <- density(month.data)
+  densities <- rbind(densities,data.frame(month=rep(month.name,length(d$y)),y=d$y,x=d$x))
+}
+
+ggplot(densities) +
+  geom_line(aes(x=x,y=y,colour=month)) +
+  scale_colour_manual(values=c(July="red",August="orange",September="green",October="blue")) +
+  xlab(expression(PM[2.5] ~ (mu*'g'~m^-3))) +
+  ylab("Density") +
+  ggtitle(substitute(PM[2.5] ~ 'Density by Month'))
+
+# How much of each month has been cut?
+init <- no.points[,'init']
+fin <- no.points[,'fin']
+no.points[,'cut'] <- (init-fin)/init
+no.points
+```

@@ -146,8 +146,14 @@ for (j in 1:length(odins)) {
 ```{r make_models}
 # september is a good place to split
 split.time <- as.POSIXct('09/01/2016 00:00',format = '%m/%d/%Y %H:%M',tz='Etc/GMT-12')
+# Initial colocation dataset
 data.init <- data[data$date < split.time,]
+nrow(data.init)
+data.init$date[nrow(data.init)] - data.init$date[1]
+# Final colocation dataset
 data.fin <- data[data$date > split.time,]
+nrow(data.fin)
+data.fin$date[nrow(data.fin)] - data.fin$date[1]
 
 # Check the length
 nrow(data.init)
@@ -165,12 +171,12 @@ for (i in 1:length(odins)) {
   eval(parse(text=paste0('form <- pm2.5 ~ ', paste(odin.vars,collapse='+'))))
   
   # Initial coefficients
-  this.init.coefs <- summary(lm(form,data=data.init))$coefficients
+  this.init.coefs <- summary(rlm(form,data=data.init))$coefficients
   coefs.init[i,'odin.n'] <- as.integer(substring(odin.name,6,8)) - 0.1
   coefs.init[i,2:9] <- this.init.coefs[1:8]
   
   # Final coefficients
-  this.fin.coefs <- summary(lm(form,data=data.fin))$coefficients
+  this.fin.coefs <- summary(rlm(form,data=data.fin))$coefficients
   coefs.fin[i,'odin.n'] <- as.integer(substring(odin.name,6,8)) + 0.1
   coefs.fin[i,2:9] <- this.fin.coefs[1:8]
   
@@ -205,47 +211,43 @@ coefs <- rbind(coefs.init,coefs.fin)
 
 # Plot constant terms
 ggplot(coefs, aes(x=odin.n,y=cnst,colour=time)) +
-  geom_errorbar(aes(ymin=cnst-cnst.std, ymax=cnst+cnst.std)) + 
+  geom_errorbar(aes(ymin=cnst-cnst.std*2, ymax=cnst+cnst.std*2)) + 
   geom_point() + 
   scale_colour_manual(values=c("red","blue"),name="Colocation",
                       labels=c(fin="Final",init="Initial")) + 
   ylab(expression("Constant")) +
-  xlab("ODIN-SD Serial") +
-  ggtitle(expression("Constant Term for Predicting"~PM[2.5]))
+  xlab("ODIN Serial") +
+  ggtitle("Model Parameters for Initial and Final 2016 Colocation")
 
 # Plot pm2.5.odin.x coefficients
 ggplot(coefs, aes(x=odin.n,y=pm2.5,colour=time)) +
-  geom_errorbar(aes(ymin=pm2.5-pm2.5.std, ymax=pm2.5+pm2.5.std)) + 
+  geom_errorbar(aes(ymin=pm2.5-pm2.5.std*2, ymax=pm2.5+pm2.5.std*2)) + 
   geom_point() + 
   scale_colour_manual(values=c("red","blue"),name="Colocation",
                       labels=c(fin="Final",init="Initial")) + 
-  ylab(expression(PM[2.5]~"Coefficient ("*mu*g^-1*m^3*")")) +
-  xlab("ODIN-SD Serial") +
-  ggtitle(expression(PM[2.5]~" (as measured by ODIN-SD) Coefficients for Predicting"
-                     ~PM[2.5]))
+  ylab(expression(PM[2.5]*"-ODIN Coefficient ("*mu*g^-1*m^3*")")) +
+  xlab("ODIN Serial") +
+  ggtitle("Model Parameters for Initial and Final 2016 Colocation")
 
 # Plot rh.odin.x coefficients
 ggplot(coefs, aes(x=odin.n,y=rh,colour=time)) +
-  geom_errorbar(aes(ymin=rh-rh.std, ymax=rh+rh.std)) + 
+  geom_errorbar(aes(ymin=rh-rh.std*2, ymax=rh+rh.std*2)) + 
   geom_point() + 
   scale_colour_manual(values=c("red","blue"),name="Colocation",
                       labels=c(fin="Final",init="Initial")) + 
-  ylab("ODIN rh vs ECan PM2.5 Gradient") +
-  xlab("ODIN-SD Serial") +
-  ggtitle("ODIN vs ECan Linear Models for Initial and Final 2016 Colocation") +
-  ylab("RH Coefficient (percentage"~point^-1*")") +
-  xlab("ODIN-SD Serial") +
-  ggtitle(expression("RH Coefficients for Predicting"~PM[2.5]))
+  ggtitle("Model Parameters for Initial and Final 2016 Colocation") +
+  ylab("RH-ODIN Coefficient (percentage"~point^-1*")") +
+  xlab("ODIN Serial")
 
 # Plot temp.odin.x coefficients
 ggplot(coefs, aes(x=odin.n,y=temp,colour=time)) +
-  geom_errorbar(aes(ymin=temp-temp.std, ymax=temp+temp.std)) + 
+  geom_errorbar(aes(ymin=temp-temp.std*2, ymax=temp+temp.std*2)) + 
   geom_point() + 
   scale_colour_manual(values=c("red","blue"),name="Colocation",
                       labels=c(fin="Final",init="Initial")) + 
-  ylab(expression("Temperature Coefficient ("*degree*C^-1*")")) +
-  xlab("ODIN-SD Serial") +
-  ggtitle(expression("Temperature Coefficients for Predicting"~PM[2.5]))
+  ylab(expression("Temp-ODIN Coefficient ("*degree*C^-1*")")) +
+  xlab("ODIN Serial") +
+  ggtitle("Model Parameters for Initial and Final 2016 Colocation")
 ```
 
 ## Plot Models
@@ -263,8 +265,8 @@ for (serial in c(102,105,108)) {
   var.y.max <- 175
   
   # Initial and final model
-  model.init <- lm(form,data=data.init)
-  model.fin <- lm(form,data=data.fin)
+  model.init <- rlm(form,data=data.init)
+  model.fin <- rlm(form,data=data.fin)
   
   # Median dataframes
   medians.init <- data.frame()
@@ -275,29 +277,29 @@ for (serial in c(102,105,108)) {
   }
 
   # Axis labels
-  xlabs.init <- list(pm2.5=substitute("ODIN-"*x~PM[2.5]~(mu*"g"~m^-3),list(x=serial)),
-                     temp=substitute("ODIN-"*x~"Temperature ("*degree*"C)",
+  xlabs.init <- list(pm2.5=substitute("ODIN-"*x*"-"*PM[2.5]~(mu*"g"~m^-3),list(x=serial)),
+                     temp=substitute("ODIN-"*x*"-"*"Temp ("*degree*"C)",
                                      list(x=serial)),
-                     rh=substitute("ODIN-"*x~"RH (%)",list(x=serial))
+                     rh=substitute("ODIN-"*x*"-"*"RH (%)",list(x=serial))
              )
-  xlabs.fin <- list(pm2.5=substitute("ODIN-"*x~PM[2.5]~(mu*"g"~m^-3),list(x=serial)),
-                     temp=substitute("ODIN-"*x~"Temperature ("*degree*"C)",
+  xlabs.fin <- list(pm2.5=substitute("ODIN-"*x*"-"*PM[2.5]~(mu*"g"~m^-3),list(x=serial)),
+                     temp=substitute("ODIN-"*x*"-"*"Temp ("*degree*"C)",
                                      list(x=serial)),
-                     rh=substitute("ODIN-"*x~"RH (%)",list(x=serial))
+                     rh=substitute("ODIN-"*x*"-"*"RH (%)",list(x=serial))
              )
   # Plot titles (omitted due to lack of space with side-by-side plots)
-  titles.fin <- list(pm2.5=substitute("ODIN-SD"~x~"vs TEOM"~PM[2.5]~
+  titles.fin <- list(pm2.5=substitute("ODIN-"*X*"-"*PM[2.5]~"vs ECan-"~PM[2.5]~
                             "at Final Colocation",list(x=serial)),
-                      temp=substitute("ODIN-SD"~x~" Temperature vs TEOM"~PM[2.5]~
+                      temp=substitute("ODIN-"*X*"-Temp vs ECan-"~PM[2.5]~
                           "at Final Colocation",list(x=serial)),
-                      rh=substitute("ODIN-SD"~x~" RH vs TEOM"~PM[2.5]~
+                      rh=substitute("ODIN-"*X*"-RH vs ECan-"~PM[2.5]~
                           "at Final Colocation",list(x=serial))
               )
-  titles.init <- list(pm2.5=substitute("ODIN-SD"~x~"vs TEOM"~PM[2.5]~
+  titles.init <- list(pm2.5=substitute("ODIN-SD"*X*"vs ECan-"~PM[2.5]~
                             "at Initial Colocation",list(x=serial)),
-                      temp=substitute("ODIN-SD"~x~" Temperature vs TEOM"~PM[2.5]~
+                      temp=substitute("ODIN-SD"*X*" Temperature vs ECan-"~PM[2.5]~
                           "at Initial Colocation",list(x=serial)),
-                      rh=substitute("ODIN-SD"~x~" RH vs TEOM"~PM[2.5]~
+                      rh=substitute("ODIN-SD"*X*" RH vs ECan-"~PM[2.5]~
                           "at Initial Colocation",list(x=serial))
               )
 

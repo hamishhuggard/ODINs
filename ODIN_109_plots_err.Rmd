@@ -1,7 +1,7 @@
 ---
-title: "Timing of calibration"
+title: "ODIN-109 Error and Plots"
 author: "Hamish Huggard"
-date: "February 14, 2018"
+date: "February 21, 2018"
 output: html_document
 ---
 
@@ -18,7 +18,6 @@ library(reshape2)
 library(zoo)
 library(ggplot2)
 library(MASS)
-library(gridExtra)
 
 # Set working directory
 setwd("c:\\Users\\Hammo\\Documents\\smoke emissions project\\code_final")
@@ -75,8 +74,6 @@ odin.raw$date <- trunc(odin.raw$date,'min')
 odin.raw$date <- as.POSIXct(odin.raw$date) # the above converted it to POSIXlt
 
 # Fix daylight savings bug
-# NB: the anomalously high error in late september remains even when the following code is removed
-# In fact, the month MSE around the anomaly gets considerably worse.
 ds.time <- as.POSIXct('09/25/2016 02:00',format = '%m/%d/%Y %H:%M', tz='Etc/GMT-12')
 odin.raw[odin.raw$date > ds.time, 'date'] <- 
   odin.raw[odin.raw$date > ds.time, 'date'] + 60*60
@@ -116,104 +113,66 @@ names(odin.avgs) <- c('date',paste0(names(odin.avgs)[2:ncol(odin.avgs)],'.odin.1
 data <- merge(data,odin.avgs,by='date',all=FALSE)
 ```
 
-## Calibration duration
+## I'm just wondering whether it's better to model ODIN as having additive or multiplicative noise
 
-```{r calibration_duration}
-max.days <- 40
-
-# Use 24 hour periods starting and ending at noon
-date.lt <- as.POSIXlt(data$date)
-noons <- data[which(date.lt$hour==12 & date.lt$min==0),'date']
-start.date <- noons[1]
-end.date <- noons[length(noons)]
-day <- as.POSIXct('1/1/2') - as.POSIXct('1/1/1')
-week <- day * 7
-month <- week*4
-
-mse <- data.frame(days=NA,mse=NA)
-mse[1:max.days,'days'] <- 1:max.days
-
-mse2 <- matrix(NA,ncol=31,nrow=max.days)
-for (i in 1:max.days) {
-  for (j in 0:30) {
-    train.inds <- which(start.date + day*i + day*j < data$date &
-                          data$date < start.date + day*i + day*j + week)
-    test.inds <- which(start.date + day*i + day*j + week < data$date &
-                          data$date < start.date + day*i + day*j + week + month)
-    train.data <- data[train.inds,]
-    test.data <- data[-train.inds]
-    model <- rlm(pm2.5~pm2.5.odin.109+temp.odin.109+rh.odin.109,data=train.data)
-    y.hat <- predict(model,test.data)
-    mse2[i,j+1] <- mean((test.data$pm2.5-y.hat)^2,na.rm=TRUE)
-  }
-  
-  mse[i,'mse'] <- mean(mse2[i,])
-  
+```{r playground}
+data.backup <- data
+data <- data[!is.na(data$pm2.5),]
+pm.odin <- data$pm2.5.odin.109
+pm.ecan <- data$pm2.5
+df <- data.frame(x=seq(from=min(pm.odin),to=max(pm.odin),length.out=100),y=NA,num=NA)
+for (i in 2:length(df$x)) {
+  inds <- which(pm.odin<df$x[i] & pm.odin>df$x[i-1])
+  odin.i <- pm.odin[inds]
+  ecan.i <- pm.ecan[inds]
+  df[i,'y'] <- mean(abs(odin.i-ecan.i),na.rm=TRUE)
+  df[i,'num'] <- length(odin.i)
 }
 
-mse
-
-summary(lm(mse~days,data=mse))$coefficients
-
-# Plot
-
-ggplot(mse,aes(days,mse)) +
+ggplot(df,aes(x,y,weight=num)) +
   geom_line() +
-  ylab("MSE") +
-  xlab("Days of Training Data Used") +
-  ggtitle("MSE of ODIN-109 Model with Varying-Sized Window of Training Data") +
-  geom_smooth(method="lm")
+  geom_smooth(method='lm') +
+  ylab("MAE") +
+  xlab(expression(PM[2.5]*"-ODIN-109")) +
+  ggtitle(expression("MAE as a function of"~PM[2.5]*"-ODIN-109 (+ lm weighted by frequency)"))
+
+ggplot(df,aes(x,y)) +
+  geom_line() +
+  geom_smooth(method='lm') +
+  ylab("MAE") +
+  xlab(expression(PM[2.5]*"-ODIN-109")) +
+  ggtitle(expression("MAE as a function of"~PM[2.5]*"-ODIN-109"))
+
+summary(lm(y~x,df,weights=num))
+summary(lm(y~x,df))
+
+summary(pm.odin)
 ```
 
-## Calibration Timing
+because the linear models have non-zero intercepts (significant at 95%), but also non-zero gradients (significant at 95%), we should probably think of the ODIN as having both additive and multiplicative noise. The multiplicative noise is something like 20%, and the additive noise is something like 2. 
 
-```{r timing}
-# Calibrating using one week of data
-mse.week <- data.frame(date=noons[1],mse=NA)
-mse.month <- data.frame(date=noons[1],mse=NA)
-no.days <- floor( (data$date[nrow(data)]-data$date[1]) )-30
+## Visualize Data
+```{r pretty_pictures}
+ggplot(data) +
+  geom_point(aes(temp.odin.109,pm2.5),alpha=0.5) +
+  ylab(expression(PM[2.5]*"-ECan"~(mu*'g'~m^-3))) +
+  xlab(expression("Temp-ODIN-109 ("*degree*"C)")) +
+  ggtitle("Full ODIN-109 2016 Dataset")
 
-for (i in 1:no.days) {
-  # Week long window
-  train.inds <- which(start.date + i*day < data$date & 
-                        data$date < start.date + i*day + week)
-  train.data <- data[train.inds,]
-  test.data <- data[-train.inds,]
-  model <- rlm(pm2.5~pm2.5.odin.109+temp.odin.109+rh.odin.109,data=train.data)
-  y.hat <- predict(model,test.data)
-  mse.week[i,'mse'] <- mean((test.data$pm2.5-y.hat)^2,na.rm=TRUE)
-  mse.week[i,'date'] <- train.data[1,'date']
-  
-  # Month long window
-  train.inds <- which(start.date + i*day < data$date & 
-                        data$date < start.date + i*day + month)
-  train.data <- data[train.inds,]
-  test.data <- data[-train.inds,]
-  model <- rlm(pm2.5~pm2.5.odin.109+temp.odin.109+rh.odin.109,data=train.data)
-  y.hat <- predict(model,test.data)
-  mse.month[i,'mse'] <- mean((test.data$pm2.5-y.hat)^2,na.rm=TRUE)
-  mse.month[i,'date'] <- train.data[1,'date']
-}
+ggplot(data) +
+  geom_point(aes(rh.odin.109,pm2.5),alpha=0.5) +
+  ylab(expression(PM[2.5]*"-ECan"~(mu*'g'~m^-3))) +
+  xlab(expression("RH-ODIN-109 (%)")) +
+  ggtitle("Full ODIN-109 2016 Dataset")
 
-# Plot the month and week data together
-mse.week[,'duration'] <- rep("Week",nrow(mse.week))
-mse.month[,'duration'] <- rep("Month",nrow(mse.month))
+ggplot(data) +
+  geom_point(aes(pm2.5.odin.109,pm2.5),alpha=0.5) +
+  ylab(expression(PM[2.5]*"-ECan"~(mu*'g'~m^-3))) +
+  xlab(expression(PM[2.5]*"-ODIN-109"~(mu*'g'~m^-3))) +
+  ggtitle("Full ODIN-109 2016 Dataset")
 
-ggplot(rbind(mse.week,mse.month)) +
-  geom_line(aes(date,mse,colour=duration)) +
-  xlab("Start Date of Training Data") +
-  ylab("MSE") +
-  ggtitle("MSE of ODIN-109 Model with Sliding Window of Training Data") +
-  scale_colour_manual("Window length",values=c("red","blue"))
-
-# Look at linear models
-
-# Convert date from seconds to days with 0 = initial date
-mse.week$date2 <- (mse.week$date-mse.week$date[1])/24/60/60 
-mse.month$date2 <- (mse.week$date-mse.month$date[1])/24/60/60 
-summary(lm(mse~date2,data=mse.week))$coefficients
-summary(lm(mse~date2,data=mse.month))$coefficients
-# Start date is...
-mse.week$date[1]
-mse.month$date[1]
+# look at correlations
+cor(data$pm2.5.odin.109,data$rh.odin.109,use="pairwise.complete.obs")
+cor(data$pm2.5.odin.109,data$temp.odin.109,use="pairwise.complete.obs")
+cor(data$temp.odin.109,data$rh.odin.109,use="pairwise.complete.obs")
 ```

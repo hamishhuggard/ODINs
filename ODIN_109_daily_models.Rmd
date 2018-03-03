@@ -113,12 +113,87 @@ names(odin.avgs) <- c('date',paste0(names(odin.avgs)[2:ncol(odin.avgs)],'.odin.1
 data <- merge(data,odin.avgs,by='date',all=FALSE)
 ```
 
+
+## Daily Models with lm
+
 ```{r build_models}
 # Use 24 hour periods starting and ending at noon
 date.lt <- as.POSIXlt(data$date)
 noons <- data[which(date.lt$hour==12 & date.lt$min==0),'date']
 
-daily.model <- data.frame()
+daily.model <- data.frame(day=noons[1])
+
+for (i in 2:length(noons)) {
+  
+  # Build the daily model and record coefficients
+  day.data <- data[data$date >= noons[i-1] & data$date <= noons[i],]
+  day <- day.data$date[1]
+  day.coefs <- summary(lm(pm2.5~pm2.5.odin.109+rh.odin.109+temp.odin.109,
+                          data=day.data))$coefficients
+  daily.model[i,'day'] <- day
+  daily.model[i,'pm2.5'] <- day.coefs['pm2.5.odin.109',1]
+  daily.model[i,'temp'] <- day.coefs['temp.odin.109',1]
+  daily.model[i,'rh'] <- day.coefs['rh.odin.109',1]
+  daily.model[i,'cnst'] <- day.coefs['(Intercept)',1]
+  # 95% CI is two std's
+  daily.model[i,'pm2.5.err'] <- day.coefs['pm2.5.odin.109',2] * 2
+  daily.model[i,'temp.err'] <- day.coefs['temp.odin.109',2] * 2
+  daily.model[i,'rh.err'] <- day.coefs['rh.odin.109',2] * 2
+  daily.model[i,'cnst.err'] <- day.coefs['(Intercept)',2] * 2
+  # Weight is inverse of error
+  daily.model[i,'pm2.5.wt'] <- 1 / day.coefs['pm2.5.odin.109',2] 
+  daily.model[i,'temp.wt'] <- 1 / day.coefs['temp.odin.109',2] 
+  daily.model[i,'rh.wt'] <- 1 / day.coefs['rh.odin.109',2] 
+  daily.model[i,'cnst.wt'] <- 1 / day.coefs['(Intercept)',2] 
+  
+  # Record some facts about the day's data
+  daily.model[i,'mean.pm2.5'] <- mean(day.data$pm2.5)
+  daily.model[i,'mean.temp'] <- mean(day.data$temp.2m)
+  
+}
+
+# Plot linear models over time
+
+y.lab <- c(pm2.5="expression(PM[2.5]*'-ODIN Coefficient')",
+               rh="'RH-ODIN Coefficient'",
+               temp="'Temp-ODIN Coefficient'",
+               cnst="'Constant'")
+for (var in c('pm2.5','rh','temp','cnst')) {
+  var.std <- paste0(var,'.err')
+  eval(parse(text=paste0("p <- ggplot(daily.model, aes(x=day,y=",var,",weight=",var,".wt)) +",
+    "geom_errorbar(aes(ymin=",var,"-",var.std,", ymax=",var,"+",var.std,")) + ",
+    "geom_point() + ",
+    'scale_colour_manual(values=c("red","blue")) + ',
+    'xlab("Date") +',
+    'ylab(',y.lab[var],') +',
+    'ggtitle("Model Parameters from Successive 24-Hour Periods of ODIN-109 Data") +',
+    'geom_smooth(method="lm")'
+    )))
+  print(p)
+}
+```
+
+```{r modelling_models}
+headers <- c(pm2.5="PM2.5 Coefficient Predictors",
+             rh="Relative Humidity Coefficient Predictors",
+             temp="Temperature Coefficient Predictors",
+             cnst="Constant Term Predictors")
+for (var in c('pm2.5','rh','temp','cnst')) {
+  eval(parse(text=paste0("coefs <- summary(lm(",var,"~day + mean.pm2.5,",
+                         "data=daily.model,weight=",var,".wt))$coefficients")))
+  writeLines(paste0('\n',headers[var],'\n'))
+  print(coefs)
+}
+```
+
+## Daily Models with rlm
+
+```{r build_models2}
+# Use 24 hour periods starting and ending at noon
+date.lt <- as.POSIXlt(data$date)
+noons <- data[which(date.lt$hour==12 & date.lt$min==0),'date']
+
+daily.model <- data.frame(day=noons[1])
 
 for (i in 2:length(noons)) {
   
@@ -132,10 +207,16 @@ for (i in 2:length(noons)) {
   daily.model[i,'temp'] <- day.coefs['temp.odin.109',1]
   daily.model[i,'rh'] <- day.coefs['rh.odin.109',1]
   daily.model[i,'cnst'] <- day.coefs['(Intercept)',1]
-  daily.model[i,'pm2.5.std'] <- day.coefs['pm2.5.odin.109',2]
-  daily.model[i,'temp.std'] <- day.coefs['temp.odin.109',2]
-  daily.model[i,'rh.std'] <- day.coefs['rh.odin.109',2]
-  daily.model[i,'cnst.std'] <- day.coefs['(Intercept)',2]
+  # 95% CI is two std's
+  daily.model[i,'pm2.5.err'] <- day.coefs['pm2.5.odin.109',2] * 2
+  daily.model[i,'temp.err'] <- day.coefs['temp.odin.109',2] * 2
+  daily.model[i,'rh.err'] <- day.coefs['rh.odin.109',2] * 2
+  daily.model[i,'cnst.err'] <- day.coefs['(Intercept)',2] * 2
+  # Weight is inverse of error
+  daily.model[i,'pm2.5.wt'] <- 1 / day.coefs['pm2.5.odin.109',2] 
+  daily.model[i,'temp.wt'] <- 1 / day.coefs['temp.odin.109',2] 
+  daily.model[i,'rh.wt'] <- 1 / day.coefs['rh.odin.109',2] 
+  daily.model[i,'cnst.wt'] <- 1 / day.coefs['(Intercept)',2] 
   
   # Record some facts about the day's data
   daily.model[i,'mean.pm2.5'] <- mean(day.data$pm2.5)
@@ -144,32 +225,34 @@ for (i in 2:length(noons)) {
 }
 
 # Plot linear models over time
-var.title <- c(pm2.5="expression('Coefficients for'~PM[2.5]~'from Daily Models')",
-               rh="'Coefficients for Relative Humidity from Daily Models'",
-               temp="'Coefficients for Temperature from Daily Models'",
-               cnst="'Constant Terms from Daily Models'")
+
+y.lab <- c(pm2.5="expression(PM[2.5]*'-ODIN Coefficient')",
+               rh="'RH-ODIN Coefficient'",
+               temp="'Temp-ODIN Coefficient'",
+               cnst="'Constant'")
 for (var in c('pm2.5','rh','temp','cnst')) {
-  var.std <- paste0(var,'.std')
-  eval(parse(text=paste("p <- ggplot(daily.model, aes(x=day,y=",var,")) +",
+  var.std <- paste0(var,'.err')
+  eval(parse(text=paste0("p <- ggplot(daily.model, aes(x=day,y=",var,",weight=",var,".wt)) +",
     "geom_errorbar(aes(ymin=",var,"-",var.std,", ymax=",var,"+",var.std,")) + ",
     "geom_point() + ",
     'scale_colour_manual(values=c("red","blue")) + ',
-    'ylab("Coefficient") +',
-    'xlab("Day") +',
-    'ggtitle(',var.title[var],')'
+    'xlab("Date") +',
+    'ylab(',y.lab[var],') +',
+    'ggtitle("Model Parameters from Successive 24-Hour Periods of ODIN-109 Data") +',
+    'geom_smooth(method="lm")'
     )))
   print(p)
 }
 ```
 
-```{r modelling_models}
+```{r modelling_models2}
 headers <- c(pm2.5="PM2.5 Coefficient Predictors",
              rh="Relative Humidity Coefficient Predictors",
              temp="Temperature Coefficient Predictors",
              cnst="Constant Term Predictors")
 for (var in c('pm2.5','rh','temp','cnst')) {
-  eval(parse(text=paste0("form <- ",var," ~ day + mean.pm2.5")))# + mean.temp")))
-  coefs <- summary(lm(form,data=daily.model))$coefficients
+  eval(parse(text=paste0("coefs <- summary(lm(",var,"~day + mean.pm2.5,",
+                         "data=daily.model,weight=",var,".wt))$coefficients")))
   writeLines(paste0('\n',headers[var],'\n'))
   print(coefs)
 }
